@@ -55,7 +55,7 @@ jobs:
           DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || 'false' }}
           MONTH: ${{ inputs.month }}
           INVOICE_NO: ${{ inputs.invoice_no }}
-          FORCE: ${{ github.event_name == 'workflow_dispatch' && 'true' || 'false' }}
+          FORCE: "false"
         run: node recurring.js
       - name: Commit run log
         if: always()
