@@ -1,0 +1,69 @@
+name: Recurring invoices
+
+# Runs every 10 minutes. Each run sends emails queued from the app ("Email invoice").
+# Monthly invoices are created/sent on days 1–5 of the month from 09:00 IST
+# (the 1st normally; later days catch up if a run was missed). Other days it just
+# touches the database, which keeps a free Supabase project awake.
+on:
+  schedule:
+    - cron: "*/10 * * * *"   # every 10 min: sends invoices queued from the app; monthly run on days 1–5 from 09:00 IST
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Test run: email the PDF only to you, change nothing"
+        type: boolean
+        default: true
+      month:
+        description: "Service month to process, YYYY-MM (blank = last month)"
+        required: false
+      invoice_no:
+        description: "Send this one invoice now instead (e.g. ESR-311026)"
+        required: false
+
+permissions:
+  contents: write   # to commit automation/run-log.md (keeps the scheduled job from being auto-disabled)
+
+concurrency:
+  group: recurring-invoices
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Install
+        working-directory: automation
+        run: npm install --no-audit --no-fund --omit=dev
+      - name: Generate and email
+        working-directory: automation
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          SMTP_HOST: ${{ secrets.SMTP_HOST }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+          SMTP_USER: ${{ secrets.SMTP_USER }}
+          SMTP_PASS: ${{ secrets.SMTP_PASS }}
+          MAIL_FROM: ${{ secrets.MAIL_FROM }}
+          MAIL_COPY_TO: ${{ secrets.MAIL_COPY_TO }}
+          TZ_NAME: Asia/Kolkata
+          CATCHUP_DAYS: "5"
+          DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.dry_run || 'false' }}
+          MONTH: ${{ inputs.month }}
+          INVOICE_NO: ${{ inputs.invoice_no }}
+          FORCE: ${{ github.event_name == 'workflow_dispatch' && 'true' || 'false' }}
+        run: node recurring.js
+      - name: Commit run log
+        if: always()
+        run: |
+          if [ -n "$(git status --porcelain automation/run-log.md)" ]; then
+            git config user.name  "invoice-bot"
+            git config user.email "invoice-bot@users.noreply.github.com"
+            git add automation/run-log.md
+            git commit -m "Recurring invoices: run log $(date -u +%F)"
+            git push
+          fi

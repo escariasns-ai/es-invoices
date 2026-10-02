@@ -63,7 +63,7 @@ table.list tr:last-child td{border-bottom:0}
 .pill{display:inline-block;font-size:12px;font-weight:600;padding:1px 9px;border-radius:20px;white-space:nowrap}
 .pill.regular{background:var(--tint);color:var(--green-ink)} .pill.special{background:var(--special-bg);color:var(--special)}
 .pill.paid{background:var(--tint);color:var(--green-ink)} .pill.issued{background:var(--warn-bg);color:var(--warn)}
-.pill.draft{background:var(--field);color:var(--muted)} .pill.cancelled{background:var(--bad-bg);color:var(--bad)}
+.pill.draft{background:var(--field);color:var(--muted)} .pill.cancelled,.pill.failed{background:var(--bad-bg);color:var(--bad)} .pill.queued{background:var(--warn-bg);color:var(--warn)}
 .acts{white-space:nowrap;text-align:right}
 .acts button{margin-left:4px}
 button,.btn{font:inherit;font-size:14px;font-weight:600;border-radius:6px;padding:7px 14px;cursor:pointer;border:1px solid var(--green);background:var(--green);color:#fff}
@@ -92,8 +92,12 @@ dialog form{display:flex;flex-direction:column;max-height:92vh}
 .numbox{font-size:13px;color:var(--muted);margin-top:10px}
 .numbox b{color:var(--ink);font-size:15px}
 .item{border:1px solid var(--line);border-radius:6px;padding:4px 10px 10px;margin-top:10px;background:var(--field)}
+.item .xtag{display:inline-block;margin-top:8px;font-size:12px;font-weight:600;color:var(--warn);background:var(--warn-bg);border-radius:20px;padding:1px 8px}
+.item .tdschk{display:flex;gap:6px;align-items:center;color:var(--ink);font-size:13px;margin:8px 0 0}
+.item .tdschk input{width:auto}
 .item .row{display:grid;grid-template-columns:1fr 90px 130px auto;gap:8px;align-items:end}
-@media (max-width:600px){.item .row{grid-template-columns:1fr 1fr}}
+@media (max-width:600px){.item .xtag{display:inline-block;margin-top:8px;font-size:12px;font-weight:600;color:var(--warn);background:var(--warn-bg);border-radius:20px;padding:1px 8px}
+.item .row{grid-template-columns:1fr 1fr}}
 .sums{margin-top:12px;display:grid;grid-template-columns:auto auto;justify-content:end;gap:2px 22px;font-variant-numeric:tabular-nums}
 .sums .t{font-weight:700}
 .bars{display:grid;grid-template-columns:repeat(12,1fr);gap:6px;align-items:end;height:150px;margin-top:8px}
@@ -262,6 +266,7 @@ dialog form{display:flex;flex-direction:column;max-height:92vh}
     </div>
     <div id="items"></div>
     <button type="button" class="ghost small" id="addItem" style="margin-top:8px">Add line</button>
+    <button type="button" class="ghost small" id="addExp" style="margin-top:8px">Add expense bills…</button>
     <div class="grid3">
       <div><label for="fTds">TDS %</label><input type="number" id="fTds" min="0" max="100" step="0.01"></div>
       <div><label for="fTax">GST / Taxes</label><input id="fTax" placeholder="As applicable"></div>
@@ -279,8 +284,44 @@ dialog form{display:flex;flex-direction:column;max-height:92vh}
   <div class="dfoot">
     <button type="button" class="danger" id="invDelete">Delete</button>
     <span style="flex:1"></span>
+    <button type="button" class="ghost" id="invMail">Email…</button>
     <button type="button" class="ghost" id="invPreview">Preview PDF</button>
     <button type="submit" id="invSave">Save</button>
+  </div>
+</form></dialog>
+
+<!-- ============ PICK EXPENSES DIALOG ============ -->
+<dialog id="pickDlg"><form id="pickForm" method="dialog">
+  <div class="dhead"><h2 style="margin:0">Add expense bills to this invoice</h2><button type="button" class="ghost small" data-close>Close</button></div>
+  <div class="dbody">
+    <div class="bar" style="margin:10px 0 6px">
+      <select id="pickScope" aria-label="Which expenses"><option value="client">This client's + unassigned</option><option value="all">All unbilled expenses</option></select>
+      <span class="grow"></span><span class="small muted" id="pickSum"></span>
+    </div>
+    <div class="tablewrap"><table class="list"><thead><tr><th></th><th>Date</th><th>Category</th><th>Description</th><th class="num">Amount</th><th>Bill</th></tr></thead><tbody id="pickBody"></tbody></table></div>
+    <div class="hint">Each expense becomes its own line at cost, converted to the invoice currency, with TDS off (tick "TDS applies" on a line if it should be deducted). Attached bills (receipts) go out with the invoice email. An expense can be on one invoice only.</div>
+  </div>
+  <div class="dfoot"><button type="submit" id="pickAdd">Add selected</button></div>
+</form></dialog>
+
+<!-- ============ EMAIL DIALOG ============ -->
+<dialog id="mailDlg"><form id="mailForm" method="dialog">
+  <div class="dhead"><h2 id="mailTitle" style="margin:0">Email invoice</h2><button type="button" class="ghost small" data-close>Close</button></div>
+  <div class="dbody">
+    <div class="numbox" id="mailInfo"></div>
+    <div class="grid2">
+      <div><label for="mTo">To</label><input id="mTo" required placeholder="name@company.com, other@company.com"></div>
+      <div><label for="mCc">Cc</label><input id="mCc"></div>
+    </div>
+    <label for="mSubj">Subject</label><input id="mSubj" required>
+    <label for="mBody">Message</label><textarea id="mBody" rows="12" required></textarea>
+    <div class="hint">"Send" queues it: the mail job emails the PDF from your address within about 10–15 minutes, with a copy to you. "Use my email app" downloads the PDF and opens a ready draft so you can attach it and send it yourself.</div>
+  </div>
+  <div class="dfoot">
+    <button type="button" class="danger" id="mailCancelQ" hidden>Cancel queued email</button>
+    <span style="flex:1"></span>
+    <button type="button" class="ghost" id="mailSelf">Use my email app</button>
+    <button type="submit" id="mailSend">Send</button>
   </div>
 </form></dialog>
 
@@ -309,6 +350,7 @@ dialog form{display:flex;flex-direction:column;max-height:92vh}
   <div class="dfoot">
     <button type="button" class="danger" id="expDelete">Delete</button>
     <span style="flex:1"></span>
+    <button type="button" class="ghost" id="expDup">Duplicate</button>
     <button type="submit" id="expSave">Save</button>
   </div>
 </form></dialog>
@@ -329,6 +371,21 @@ dialog form{display:flex;flex-direction:column;max-height:92vh}
     <label for="cDetail">Monthly line detail</label><input id="cDetail">
     <div class="hint">{month} is replaced with the service month, e.g. "September 2026".</div>
     <label style="display:flex;gap:8px;align-items:center;color:var(--ink);margin-top:12px"><input type="checkbox" id="cActive" style="width:auto"> Active</label>
+    <h2 style="margin-top:20px">Recurring invoice &amp; email</h2>
+    <label style="display:flex;gap:8px;align-items:center;color:var(--ink)"><input type="checkbox" id="cAuto" style="width:auto"> Create last month's regular invoice on the 1st and email it automatically</label>
+    <div id="autoFields">
+      <div class="grid2">
+        <div><label for="cAutoFrom">Start with service month</label><input type="month" id="cAutoFrom"></div>
+        <div class="hint" style="align-self:end;padding-bottom:8px" id="cAutoHint"></div>
+      </div>
+      <div class="grid2">
+        <div><label for="cTo">Email to</label><input id="cTo" placeholder="accounts@client.com, other@client.com"></div>
+        <div><label for="cCc">Cc</label><input id="cCc"></div>
+      </div>
+      <label for="cSubj">Subject</label><input id="cSubj">
+      <label for="cBody">Message</label><textarea id="cBody" rows="9"></textarea>
+      <div class="hint">Fields: {invoice_no} {invoice_date} {month} {description} {currency} {gross} {tds_pct} {tds} {net} {bank_details} {client} {name} {contact}. You always get a copy.</div>
+    </div>
   </div>
   <div class="dfoot"><button type="submit">Save</button></div>
 </form></dialog>

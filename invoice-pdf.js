@@ -60,10 +60,13 @@
   }
   function totals(inv) {
     const items = inv.items || [];
-    const subtotal = items.reduce((s, it) => s + (Number(it.qty) || 0) * (Number(it.rate) || 0), 0);
+    const line = it => (Number(it.qty) || 0) * (Number(it.rate) || 0);
+    const subtotal = items.reduce((s, it) => s + line(it), 0);
+    // lines marked tds:false (e.g. re-billed expenses) are not subject to TDS
+    const tdsBase = items.filter(it => it.tds !== false).reduce((s, it) => s + line(it), 0);
     const tdsPct = Number(inv.tds_pct) || 0;
-    const tds = Math.round(subtotal * tdsPct) / 100;
-    return { subtotal, tdsPct, tds, net: subtotal - tds };
+    const tds = Math.round(tdsBase * tdsPct) / 100;
+    return { subtotal, tdsBase, tdsPct, tds, net: subtotal - tds };
   }
 
   function buildInvoicePdf(jsPDF, data) {
@@ -150,11 +153,16 @@
     // ---- totals ----
     y += 14;
     const pre = cur === "INR" ? "" : cur + " ";
-    const rows = [["Professional Fee", pre + m(t.subtotal)], ["GST / Taxes", taxNote]];
+    const lineAmt = it => (Number(it.qty) || 0) * (Number(it.rate) || 0);
+    const reimb = (inv.items || []).filter(it => it.expense_id).reduce((s2, it) => s2 + lineAmt(it), 0);
+    const rows = reimb > 0
+      ? [["Professional Fee", pre + m(t.subtotal - reimb)], ["Reimbursement of expenses (at cost)", pre + m(reimb)], ["GST / Taxes", taxNote]]
+      : [["Professional Fee", pre + m(t.subtotal)], ["GST / Taxes", taxNote]];
+    const excludedAreExpenses = (inv.items || []).filter(it => it.tds === false).every(it => it.expense_id);
     const totalText = taxNote.toLowerCase() === "as applicable" ? `${pre}${m(t.subtotal)} + applicable taxes` : pre + m(t.subtotal);
     rows.push(["Total Invoice Value", totalText, "total"]);
     if (t.tdsPct > 0) {
-      rows.push([`Less: TDS @ ${t.tdsPct}%`, `(${pre}${m(t.tds)})`]);
+      rows.push([`Less: TDS @ ${t.tdsPct}%` + (Math.abs(t.tdsBase - t.subtotal) > 0.004 ? ` on ${pre}${m(t.tdsBase)}${excludedAreExpenses ? " (excl. reimbursements)" : ""}` : ""), `(${pre}${m(t.tds)})`]);
       rows.push(["Net Amount Receivable", pre + m(t.net), "total"]);
     }
     if (cur !== "INR") {

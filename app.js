@@ -12,7 +12,7 @@
   const MONTHS = ["January","February","March","April","May","June","July","August","September","October","November","December"];
   const SM = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
   const DEFAULT_CATS = ["Software & subscriptions","Internet & phone","Hardware","Travel","Bank charges","Professional fees","Office & supplies","Training & certification","Other"];
-  const S = { user: null, profile: null, clients: [], invoices: [], expenses: [], series: [], rates: [], fy: null, editInv: null, editExp: null, editCli: null, fxAuto: true, eFxAuto: true };
+  const S = { user: null, profile: null, clients: [], invoices: [], expenses: [], series: [], rates: [], mailReqs: [], mailInv: null, fy: null, editInv: null, editExp: null, editCli: null, fxAuto: true, eFxAuto: true };
   const BASE_CURRENCIES = ["INR", "AED", "USD", "EUR", "GBP", "SAR", "QAR", "OMR", "KWD", "BHD", "SGD", "AUD", "CAD"];
   const SERIES_DEFAULTS = {
     regular: { kind: "regular", name: "Regular invoices", prefix: "ESR-", pattern: "{PREFIX}{DD}{MM}{YY}", next_seq: 1, reset_every: "never", last_reset_key: null },
@@ -97,15 +97,17 @@
   }
   async function loadAll() {
     try {
-      const [p, c, i, x, ns, fx] = await Promise.all([
+      const [p, c, i, x, ns, fx, mr] = await Promise.all([
         sb.from("profile").select("*").maybeSingle(),
         sb.from("clients").select("*").order("name"),
         sb.from("invoices").select("*").order("invoice_date", { ascending: false }).order("invoice_no", { ascending: false }),
         sb.from("expenses").select("*").order("expense_date", { ascending: false }),
         sb.from("number_series").select("*"),
-        sb.from("exchange_rates").select("*").order("currency").order("rate_date", { ascending: false })
+        sb.from("exchange_rates").select("*").order("currency").order("rate_date", { ascending: false }),
+        sb.from("email_requests").select("id,invoice_id,status,error,requested_at,processed_at,send_to").order("requested_at", { ascending: false }).limit(300)
       ]);
-      for (const r of [p, c, i, x, ns, fx]) if (r.error) throw r.error;
+      for (const r of [p, c, i, x, ns, fx, mr]) if (r.error) throw r.error;
+      S.mailReqs = mr.data;
       S.profile = p.data; S.clients = c.data; S.invoices = i.data; S.expenses = x.data; S.series = ns.data; S.rates = fx.data;
       const missing = ["regular", "special"].filter(k => !S.series.some(r => r.kind === k));
       if (missing.length) {
@@ -143,6 +145,11 @@
     const today = todayISO();
     const cards = S.clients.filter(c => c.active && Number(c.monthly_rate) > 0).map(c => {
       const ym = nextRegularFor(c), due = monthEnd(ym), overdue = due <= today;
+      const autoOn = c.auto_invoice && (!c.auto_from_month || ym >= c.auto_from_month.slice(0, 7));
+      if (autoOn) {
+        const sendOn = `${addMonth(ym, 1)}-01`;
+        return `<div class="card due ok"><b>Automatic: ${esc(c.name)}</b><br><span class="small">${esc(monthLabel(ym))} invoice <span class="mono">${previewNo("regular", due)}</span> will be created and emailed on ${fmtDate(sendOn)}${sendOn < today ? " — it's past that date, check the GitHub Actions run" : ""}.</span></div>`;
+      }
       return `<div class="card due ${overdue ? "" : "ok"}" style="display:flex;gap:12px;align-items:center;flex-wrap:wrap">
         <div style="flex:1;min-width:220px"><b>${overdue ? "Regular invoice due" : "Next regular invoice"}: ${esc(c.name)}</b><br>
         <span class="small">${esc(monthLabel(ym))} · <span class="mono">${previewNo("regular", due)}</span> · dated ${fmtDate(due)} · ${money(c.monthly_rate, c.currency || "INR")}</span></div>
@@ -199,10 +206,11 @@
       <td class="mono">#${esc(i.invoice_no)}</td><td>${fmtDate(i.invoice_date)}</td><td>${esc(clientName(i.client_id))}</td>
       <td><span class="pill ${i.kind}">${i.kind}</span></td>
       <td class="num">${money(i.subtotal, i.currency || "INR")}</td><td class="num">${money(i.net_amount, i.currency || "INR")}${(i.currency || "INR") !== "INR" ? `<div class="small muted">${money(invINR(i, "net"))}</div>` : ""}</td>
-      <td><span class="pill ${i.status}">${i.status}${i.status === "paid" && i.paid_date ? " " + fmtDate(i.paid_date) : ""}</span></td>
-      <td class="acts"><button class="ghost small" data-pdf="${i.id}">PDF</button>${i.status === "issued" ? ` <button class="ghost small" data-pay="${i.id}">Mark paid</button>` : ""} <button class="ghost small" data-edit="${i.id}">Edit</button></td>
+      <td><span class="pill ${i.status}">${i.status}${i.status === "paid" && i.paid_date ? " " + fmtDate(i.paid_date) : ""}</span>${mailPill(i)}${i.created_by === "auto" ? ' <span class="small muted">auto</span>' : ""}</td>
+      <td class="acts"><button class="ghost small" data-pdf="${i.id}">PDF</button> <button class="ghost small" data-mail="${i.id}">Email</button>${i.status === "issued" ? ` <button class="ghost small" data-pay="${i.id}">Mark paid</button>` : ""} <button class="ghost small" data-edit="${i.id}">Edit</button></td>
     </tr>`).join("") : `<tr><td colspan="8" class="empty">No invoices in ${fyLabel(S.fy)} for this filter.</td></tr>`;
     $("invBody").querySelectorAll("[data-pdf]").forEach(b => b.onclick = () => downloadPdf(S.invoices.find(i => i.id === b.dataset.pdf)));
+    $("invBody").querySelectorAll("[data-mail]").forEach(b => b.onclick = () => openMail(S.invoices.find(i => i.id === b.dataset.mail)));
     $("invBody").querySelectorAll("[data-edit]").forEach(b => b.onclick = () => openInvoice(S.invoices.find(i => i.id === b.dataset.edit)));
     $("invBody").querySelectorAll("[data-pay]").forEach(b => b.onclick = () => {
       const i = S.invoices.find(x => x.id === b.dataset.pay); openInvoice(i);
@@ -224,34 +232,152 @@
   }
   function downloadPdf(inv) {
     if (!S.profile || !S.profile.name) toast("Add your details in Settings first — the invoice header is empty.", true);
-    window.InvoicePDF.buildInvoicePdf(window.jspdf.jsPDF, pdfData(inv)).save(`${inv.invoice_no}.pdf`);
+    window.InvoicePDF.buildInvoicePdf(window.jspdf.jsPDF, pdfData(inv)).save(`${String(inv.invoice_no).replace(/[^\w.-]+/g, "-")}.pdf`);
   }
+
+  /* ---------------- email (manual) ---------------- */
+  const lastReq = inv => S.mailReqs.find(r => r.invoice_id === inv.id);
+  function mailPill(i) {
+    const r = lastReq(i);
+    if (r && (r.status === "queued" || r.status === "sending")) return ` <span class="pill queued" title="To ${esc(r.send_to)}">✉ queued</span>`;
+    if (r && r.status === "failed" && (!i.emailed_at || r.requested_at > i.emailed_at)) return ` <span class="pill failed" title="${esc(r.error)}">✉ failed</span>`;
+    return i.emailed_at ? ` <span class="pill draft" title="Emailed to ${esc(i.emailed_to)}">✉ ${fmtDate(i.emailed_at.slice(0, 10))}</span>` : "";
+  }
+  function mailVars(inv, client) {
+    const p = S.profile || {}, cur = inv.currency || "INR", m = n => window.InvoicePDF.inr(n, cur);
+    const ym = (inv.service_month || inv.invoice_date).slice(0, 7);
+    const bank = [p.account_name && `Account name: ${p.account_name}`, p.bank_name && `Bank: ${p.bank_name}`,
+      p.account_no && `Account no.: ${p.account_no}`, p.ifsc && `IFSC: ${p.ifsc}`].filter(Boolean).join("\n");
+    return { invoice_no: inv.invoice_no, invoice_date: fmtDate(inv.invoice_date), month: monthLabel(ym),
+      description: (inv.items && inv.items[0] && inv.items[0].title) || "services", currency: cur,
+      gross: m(inv.subtotal), tds: m(inv.tds_amount), tds_pct: Number(inv.tds_pct) || 0, net: m(inv.net_amount),
+      client: client.name || "", name: p.name || "", contact: p.contact || "", bank_details: bank };
+  }
+  const fillTpl = (t, v) => String(t || "").replace(/\{(\w+)\}/g, (mm, k) => (k in v ? v[k] : mm));
+  function openMail(inv) {
+    if (!inv) return;
+    S.mailInv = inv;
+    const c = S.clients.find(x => x.id === inv.client_id) || {}, v = mailVars(inv, c), r = lastReq(inv);
+    $("mailTitle").textContent = `Email #${inv.invoice_no}`;
+    $("mTo").value = c.email_to || ""; $("mCc").value = c.email_cc || "";
+    $("mSubj").value = fillTpl(c.email_subject || DEFAULT_SUBJECT, v);
+    $("mBody").value = fillTpl(c.email_body || DEFAULT_BODY, v);
+    const pending = r && (r.status === "queued" || r.status === "sending");
+    $("mailInfo").innerHTML = pending ? `<b>Already queued</b> at ${new Date(r.requested_at).toLocaleString()} — sending soon.`
+      : r && r.status === "failed" ? `<span style="color:var(--bad)">Last attempt failed: ${esc(r.error)}</span>`
+      : inv.emailed_at ? `Already emailed to ${esc(inv.emailed_to)} on ${fmtDate(inv.emailed_at.slice(0, 10))}. Sending again is fine.`
+      : inv.status === "draft" ? `This invoice is a draft — it will be marked issued when you send.` : "";
+    $("mailCancelQ").hidden = !(r && r.status === "queued");
+    $("mailSend").disabled = !!pending;
+    $("mailDlg").showModal();
+  }
+  $("mailForm").addEventListener("submit", async e => {
+    e.preventDefault();
+    const inv = S.mailInv; if (!inv) return;
+    const to = $("mTo").value.trim();
+    if (!/\S+@\S+\.\S+/.test(to)) return toast("Enter at least one valid 'To' address.", true);
+    $("mailSend").disabled = true;
+    try {
+      if (inv.status === "draft") { const { error } = await sb.from("invoices").update({ status: "issued" }).eq("id", inv.id); if (error) throw error; }
+      const { error } = await sb.from("email_requests").insert({ invoice_id: inv.id, send_to: to, send_cc: $("mCc").value.trim(), subject: $("mSubj").value.trim(), body: $("mBody").value });
+      if (error) throw error;
+      $("mailDlg").close(); toast(`#${inv.invoice_no} queued — it will go out within about 10–15 minutes.`); loadAll();
+    } catch (err) { fail(err, "Couldn't queue email"); } finally { $("mailSend").disabled = false; }
+  });
+  $("mailSelf").addEventListener("click", () => {
+    const inv = S.mailInv; if (!inv) return;
+    downloadPdf(inv);
+    const q = [$("mCc").value.trim() && "cc=" + encodeURIComponent($("mCc").value.trim()), "subject=" + encodeURIComponent($("mSubj").value),
+      "body=" + encodeURIComponent($("mBody").value + "\n\n[Attach " + String(inv.invoice_no).replace(/[^\w.-]+/g, "-") + ".pdf from your Downloads]")].filter(Boolean).join("&");
+    window.location.href = `mailto:${$("mTo").value.split(/[,;]/).map(x => x.trim()).filter(Boolean).join(",")}?${q}`;
+    toast("PDF downloaded — attach it to the email draft that just opened.");
+  });
+  $("mailCancelQ").addEventListener("click", async () => {
+    const r = S.mailInv && lastReq(S.mailInv); if (!r) return;
+    const { error } = await sb.from("email_requests").update({ status: "cancelled" }).eq("id", r.id).eq("status", "queued");
+    if (error) return fail(error, "Couldn't cancel");
+    $("mailDlg").close(); toast("Queued email cancelled"); loadAll();
+  });
+
+  /* ---------------- expense bills on invoices ---------------- */
+  async function syncExpenseLinks(invoiceId, ids) {
+    const was = S.expenses.filter(x => x.invoice_id === invoiceId).map(x => x.id);
+    const drop = was.filter(id => !ids.includes(id));
+    if (ids.length) { const { error } = await sb.from("expenses").update({ invoice_id: invoiceId }).in("id", ids); if (error) throw error; }
+    if (drop.length) { const { error } = await sb.from("expenses").update({ invoice_id: null }).in("id", drop); if (error) throw error; }
+  }
+  const invNoOf = id => (S.invoices.find(i => i.id === id) || {}).invoice_no;
+  function pickable() {
+    const onForm = new Set(readItems().map(i => i.expense_id).filter(Boolean));
+    const me = S.editInv?.id, cid = $("fClient").value, scope = $("pickScope").value;
+    return S.expenses.filter(x => !onForm.has(x.id) && (!x.invoice_id || x.invoice_id === me) &&
+      (scope === "all" || !x.client_id || x.client_id === cid));
+  }
+  function renderPick() {
+    const rows = pickable();
+    $("pickBody").innerHTML = rows.length ? rows.map(x => `<tr>
+      <td><input type="checkbox" data-pick="${x.id}" style="width:auto" aria-label="Select"></td>
+      <td>${fmtDate(x.expense_date)}</td><td>${esc(x.category)}</td>
+      <td>${esc(x.description)}${x.client_id ? `<div class="small muted">${esc(clientName(x.client_id))}</div>` : ""}</td>
+      <td class="num">${money(x.amount, x.currency)}${x.currency !== "INR" ? `<div class="small muted">${money(expINR(x))}</div>` : ""}</td>
+      <td>${x.receipt_path ? "📎" : '<span class="muted small">none</span>'}</td></tr>`).join("")
+      : `<tr><td colspan="6" class="empty">No unbilled expenses${$("pickScope").value === "client" ? " for this client — try “All unbilled expenses”" : ""}.</td></tr>`;
+    const upd = () => {
+      const sel = [...$("pickBody").querySelectorAll("[data-pick]:checked")].map(c => S.expenses.find(x => x.id === c.dataset.pick));
+      $("pickSum").textContent = sel.length ? `${sel.length} selected · ${money(sel.reduce((t, x) => t + expINR(x), 0))}` : "";
+      $("pickAdd").disabled = !sel.length;
+    };
+    $("pickBody").querySelectorAll("[data-pick]").forEach(c => c.addEventListener("change", upd)); upd();
+  }
+  $("addExp").addEventListener("click", () => { $("pickScope").value = "client"; renderPick(); $("pickDlg").showModal(); });
+  $("pickScope").addEventListener("change", renderPick);
+  $("pickForm").addEventListener("submit", e => {
+    e.preventDefault();
+    const cur = $("fCur").value || "INR", fx = cur === "INR" ? 1 : (+$("fFx").value || 0);
+    if (cur !== "INR" && !fx) return toast(`Enter the ${cur} → INR rate on the invoice first.`, true);
+    const sel = [...$("pickBody").querySelectorAll("[data-pick]:checked")].map(c => S.expenses.find(x => x.id === c.dataset.pick));
+    // replace an empty first line instead of leaving it blank
+    const first = $("items").children[0];
+    if (first && !first.dataset.exp && !first.querySelector('[data-f="title"]').value.trim() && !+first.querySelector('[data-f="rate"]').value) first.remove();
+    sel.forEach(x => {
+      const amt = x.currency === cur ? +x.amount : Math.round(expINR(x) / fx * 100) / 100;
+      $("items").appendChild(itemRow({
+        expense_id: x.id, tds: false, title: `Reimbursement – ${x.category}`,
+        detail: `${x.description ? x.description + ", " : ""}${fmtDate(x.expense_date)}${x.currency !== cur ? ` (${money(x.amount, x.currency)} @ ${+x.fx_rate})` : ""}. Bill attached.`.replace(" Bill attached.", x.receipt_path ? " Bill attached." : ""),
+        qty: 1, rate: amt
+      }));
+    });
+    $("pickDlg").close(); calcSums(); toast(`${sel.length} expense${sel.length > 1 ? "s" : ""} added`);
+  });
 
   /* ---------------- invoice editor ---------------- */
   const kindNow = () => document.querySelector('#invForm input[name="kind"]:checked').value;
   function itemRow(it = {}) {
     const d = document.createElement("div"); d.className = "item";
-    d.innerHTML = `<label>Service title</label><input data-f="title" value="${esc(it.title)}" required>
+    if (it.expense_id) d.dataset.exp = it.expense_id;
+    d.innerHTML = (it.expense_id ? `<span class="xtag">Expense bill${S.expenses.find(x => x.id === it.expense_id)?.receipt_path ? " · receipt attached to email" : ""}</span>` : "") + `<label>Service title</label><input data-f="title" value="${esc(it.title)}" required>
       <label>Detail</label><textarea data-f="detail" rows="2">${esc(it.detail)}</textarea>
       <div class="row"><div></div>
         <div><label>Qty</label><input data-f="qty" type="number" step="0.01" min="0" value="${esc(it.qty ?? 1)}"></div>
         <div><label>Rate (INR)</label><input data-f="rate" type="number" step="0.01" min="0" value="${esc(it.rate ?? "")}"></div>
-        <div><button type="button" class="danger small" data-rm>Remove</button></div></div>`;
-    d.querySelector("[data-rm]").onclick = () => { if ($("items").children.length > 1) { d.remove(); calcSums(); } };
+        <div><button type="button" class="danger small" data-rm>Remove</button></div></div>
+      <label class="tdschk"><input type="checkbox" data-f="tds" ${it.tds === false ? "" : "checked"}> TDS applies to this line</label>`;
+    d.querySelector("[data-rm]").onclick = () => { if ($("items").children.length > 1 || d.dataset.exp) { d.remove(); if (!$("items").children.length) $("items").appendChild(itemRow({ qty: 1 })); calcSums(); } };
     d.querySelectorAll("input,textarea").forEach(x => x.addEventListener("input", calcSums));
+    d.querySelector('[data-f="tds"]').addEventListener("change", calcSums);
     return d;
   }
-  const readItems = () => [...$("items").children].map(d => ({
+  const readItems = () => [...$("items").children].map(d => Object.assign({
     title: d.querySelector('[data-f="title"]').value.trim(),
     detail: d.querySelector('[data-f="detail"]').value.trim(),
     qty: Number(d.querySelector('[data-f="qty"]').value) || 0,
     rate: Number(d.querySelector('[data-f="rate"]').value) || 0
-  }));
+  }, d.querySelector('[data-f="tds"]').checked ? {} : { tds: false }, d.dataset.exp ? { expense_id: d.dataset.exp } : {}));
   function calcSums() {
     const t = window.InvoicePDF.totals({ items: readItems(), tds_pct: $("fTds").value });
     const cur = $("fCur").value || "INR", fx = cur === "INR" ? 1 : (+$("fFx").value || 0);
-    $("sums").innerHTML = `<span>Professional fee</span><span class="num">${money(t.subtotal, cur)}</span>
-      <span>Less TDS @ ${t.tdsPct}%</span><span class="num">(${money(t.tds, cur)})</span>
+    $("sums").innerHTML = `<span>Invoice total</span><span class="num">${money(t.subtotal, cur)}</span>
+      <span>Less TDS @ ${t.tdsPct}%${Math.abs(t.tdsBase - t.subtotal) > 0.004 ? ` on ${money(t.tdsBase, cur)}` : ""}</span><span class="num">(${money(t.tds, cur)})</span>
       <span class="t">Net receivable</span><span class="num t">${money(t.net, cur)}</span>` +
       (cur !== "INR" ? `<span class="muted">In INR @ ${fx || "?"}</span><span class="num muted">${fx ? money(t.net * fx) : "set a rate"}</span>` : "");
     updateNumBox();
@@ -261,7 +387,7 @@
     const same = e && e.kind === k && e.invoice_date === d;
     const no = same ? e.invoice_no : previewNo(k, d, e?.id);
     const sr = seriesFor(k);
-    $("numBox").innerHTML = no ? `${same ? "Invoice number" : "Will be numbered"} <b class="mono">#${esc(no)}</b> <span class="small">· ${esc(sr.name || k)} series</span>` : "";
+    $("numBox").innerHTML = no ? `${same ? "Invoice number" : "Will be numbered"} <b class="mono">#${esc(no)}</b> <span class="small">· ${esc(sr.name || k)} series${e?.emailed_at ? ` · emailed to ${esc(e.emailed_to)} on ${fmtDate(e.emailed_at.slice(0, 10))}` : ""}</span>` : "";
   }
   function fillFx(force) {
     const cur = $("fCur").value, info = rateOn(cur, $("fDate").value);
@@ -319,7 +445,7 @@
       $("fCur").value = client.currency || "INR"; S.fxAuto = true; fillFx(true);
     }
     if (!$("items").children.length) $("items").appendChild(itemRow({ qty: 1 }));
-    $("invDelete").hidden = !inv;
+    $("invDelete").hidden = !inv; $("invMail").hidden = !inv;
     syncKind(); syncPaid(); calcSums();
     $("invDlg").showModal();
   }
@@ -372,6 +498,10 @@
       amount_received: $("fStatus").value === "paid" && $("fRecv").value !== "" ? Number($("fRecv").value) : null
     };
   }
+  $("invMail").addEventListener("click", () => {
+    if (!S.editInv) return toast("Save the invoice first, then email it.", true);
+    $("invDlg").close(); openMail(S.invoices.find(i => i.id === S.editInv.id) || S.editInv);
+  });
   $("invPreview").addEventListener("click", () => {
     const f = formInvoice(), t = window.InvoicePDF.totals(f);
     const no = S.editInv && S.editInv.kind === f.kind && S.editInv.invoice_date === f.invoice_date ? S.editInv.invoice_no : previewNo(f.kind, f.invoice_date, S.editInv?.id);
@@ -393,6 +523,7 @@
       const q = S.editInv ? sb.from("invoices").update(f).eq("id", S.editInv.id) : sb.from("invoices").insert({ ...f, invoice_no: "auto" });
       const { data, error } = await q.select().single();
       if (error) throw error;
+      await syncExpenseLinks(data.id, f.items.map(i => i.expense_id).filter(Boolean));
       $("invDlg").close(); toast(`Saved #${data.invoice_no}`);
       await loadAll();
     } catch (err) { fail(err, "Couldn't save invoice"); }
@@ -421,13 +552,14 @@
     const totINR = rows.reduce((s, x) => s + expINR(x), 0);
     $("expTotals").textContent = rows.length ? `${rows.length} entries · ${money(totINR)} in INR` + (Object.keys(tot).some(k => k !== "INR") ? " (" + Object.entries(tot).map(([k, v]) => money(v, k)).join(" + ") + ")" : "") : "";
     $("expBody").innerHTML = rows.length ? rows.map(x => `<tr>
-      <td>${fmtDate(x.expense_date)}</td><td>${esc(x.category)}</td><td>${esc(x.description)}${x.paid_via ? `<div class="small muted">${esc(x.paid_via)}</div>` : ""}</td>
+      <td>${fmtDate(x.expense_date)}</td><td>${esc(x.category)}</td><td>${esc(x.description)}${x.paid_via ? `<div class="small muted">${esc(x.paid_via)}</div>` : ""}${x.invoice_id ? `<div class="small"><span class="pill paid">billed on #${esc(invNoOf(x.invoice_id) || "?")}</span></div>` : ""}</td>
       <td>${x.client_id ? esc(clientName(x.client_id)) : '<span class="muted">—</span>'}</td>
       <td class="num">${money(x.amount, x.currency)}${x.currency !== "INR" ? `<div class="small muted">${money(expINR(x))} @ ${+x.fx_rate}</div>` : ""}</td>
       <td>${x.receipt_path ? `<button class="ghost small" data-rcpt="${x.id}">View</button>` : '<span class="muted small">none</span>'}</td>
-      <td class="acts"><button class="ghost small" data-xedit="${x.id}">Edit</button></td></tr>`).join("")
+      <td class="acts"><button class="ghost small" data-xcopy="${x.id}" title="New expense with the same details">Copy</button> <button class="ghost small" data-xedit="${x.id}">Edit</button></td></tr>`).join("")
       : `<tr><td colspan="7" class="empty">No expenses for this filter.</td></tr>`;
     $("expBody").querySelectorAll("[data-xedit]").forEach(b => b.onclick = () => openExpense(S.expenses.find(x => x.id === b.dataset.xedit)));
+    $("expBody").querySelectorAll("[data-xcopy]").forEach(b => b.onclick = () => openExpense(S.expenses.find(x => x.id === b.dataset.xcopy), true));
     $("expBody").querySelectorAll("[data-rcpt]").forEach(b => b.onclick = () => viewReceipt(S.expenses.find(x => x.id === b.dataset.rcpt)));
   }
   function filteredExpenses() {
@@ -442,17 +574,21 @@
     csvDownload(`expenses_${$("expMonth").value || fyLabel(S.fy).replace(" ", "_")}.csv`, [["Date", "Category", "Description", "Paid via", "Client", "Amount", "Currency", "Rate to INR", "Amount INR", "Receipt"],
       ...rows.map(x => [x.expense_date, x.category, x.description, x.paid_via, x.client_id ? clientName(x.client_id) : "", x.amount, x.currency, x.fx_rate || 1, expINR(x), x.receipt_path ? "yes" : ""])]);
   });
-  function openExpense(x) {
-    S.editExp = x || null;
-    $("expDlgTitle").textContent = x ? "Edit expense" : "Add expense";
+  function openExpense(x, clone) {
+    S.editExp = clone ? null : (x || null);
+    $("expDlgTitle").textContent = clone ? "New expense (copy)" : x ? "Edit expense" : "Add expense";
     $("eClient").innerHTML = `<option value="">— none —</option>` + S.clients.map(c => `<option value="${c.id}">${esc(c.name)}</option>`).join("");
-    $("eDate").value = x ? x.expense_date : todayISO(); $("eCat").value = x ? x.category : "";
+    $("eDate").value = x && !clone ? x.expense_date : todayISO(); $("eCat").value = x ? x.category : "";
     $("eVia").value = x ? x.paid_via || "" : ""; $("eDesc").value = x ? x.description || "" : "";
     $("eCur").innerHTML = curOptions(x ? x.currency : "INR");
     $("eAmt").value = x ? x.amount : ""; $("eClient").value = x?.client_id || "";
-    $("eFx").value = x ? x.fx_rate || 1 : 1; S.eFxAuto = !x; syncEFx(!x);
-    $("eFile").value = ""; $("eFileNow").textContent = x?.receipt_path ? "A receipt is attached. Choosing a new file replaces it." : "";
-    $("expDelete").hidden = !x;
+    $("eFx").value = x ? x.fx_rate || 1 : 1; S.eFxAuto = !x || !!clone; syncEFx(!x || !!clone);
+    $("eFile").value = "";
+    $("eFileNow").textContent = clone ? "Copied from an existing expense — dated today, attach this bill's receipt." :
+      x?.receipt_path ? "A receipt is attached. Choosing a new file replaces it." : "";
+    if (x && !clone && x.invoice_id) $("eFileNow").textContent += ` Billed on invoice #${invNoOf(x.invoice_id) || "?"}.`;
+    $("expDelete").hidden = !x || !!clone; $("expDup").hidden = !x || !!clone;
+    $("expDlg").dataset.src = x ? x.id : "";
     $("expDlg").showModal();
   }
   function syncEFx(force) {
@@ -490,8 +626,9 @@
     } catch (err) { fail(err, "Couldn't save expense"); }
     finally { $("expSave").disabled = false; }
   });
+  $("expDup").addEventListener("click", () => { const x = S.editExp; if (!x) return; $("expDlg").close(); openExpense(x, true); });
   $("expDelete").addEventListener("click", async () => {
-    const x = S.editExp; if (!x || !confirm("Delete this expense?")) return;
+    const x = S.editExp; if (!x || !confirm(x.invoice_id ? `This expense is billed on #${invNoOf(x.invoice_id)}. Delete it anyway? (Remove its line from that invoice too.)` : "Delete this expense?")) return;
     if (x.receipt_path) await sb.storage.from("receipts").remove([x.receipt_path]);
     const { error } = await sb.from("expenses").delete().eq("id", x.id);
     if (error) return fail(error, "Couldn't delete");
@@ -509,12 +646,21 @@
       <td><b>${esc(c.name)}</b><div class="small muted">${esc(c.address)}</div></td>
       <td>${Number(c.monthly_rate) > 0 ? money(c.monthly_rate, c.currency || "INR") : '<span class="muted">—</span>'}</td>
       <td>${Number(c.tds_pct) || 0}%</td>
-      <td>${c.active ? "Active" : '<span class="muted">Inactive</span>'}</td>
+      <td>${c.active ? "Active" : '<span class="muted">Inactive</span>'}${c.auto_invoice && c.active ? ' <span class="pill paid">auto-email</span>' : ""}</td>
       <td class="acts"><button class="ghost small" data-cedit="${c.id}">Edit</button></td></tr>`).join("")
       : `<tr><td colspan="5" class="empty">No clients yet.</td></tr>`;
     $("cliBody").querySelectorAll("[data-cedit]").forEach(b => b.onclick = () => openClient(S.clients.find(c => c.id === b.dataset.cedit)));
   }
   $("newCli").addEventListener("click", () => openClient(null));
+  const DEFAULT_SUBJECT = "Invoice {invoice_no} – {description} – {month}";
+  const DEFAULT_BODY = "Dear Accounts Team,\n\nPlease find attached invoice {invoice_no} dated {invoice_date} for {description} for {month}.\n\nInvoice value: {currency} {gross}\nLess TDS @ {tds_pct}%: {currency} {tds}\nNet payable: {currency} {net}\n\nPayment details:\n{bank_details}\n\nKindly process the payment at your earliest convenience.\n\nRegards,\n{name}\n{contact}";
+  function syncAuto() {
+    $("autoFields").hidden = !$("cAuto").checked;
+    const ym = $("cAutoFrom").value;
+    $("cAutoHint").textContent = ym ? `First automatic invoice: ${monthLabel(ym)}, dated ${fmtDate(monthEnd(ym))}, emailed on 1 ${MONTHS[+addMonth(ym, 1).slice(5) - 1]} ${addMonth(ym, 1).slice(0, 4)}.` : "";
+  }
+  $("cAuto").addEventListener("change", syncAuto);
+  $("cAutoFrom").addEventListener("change", syncAuto);
   function openClient(c) {
     S.editCli = c || null;
     $("cliDlgTitle").textContent = c ? "Edit client" : "Add client";
@@ -524,13 +670,22 @@
     $("cTitle").value = c?.monthly_title ?? "IT Support Services – ERP (Oracle APEX)";
     $("cDetail").value = c?.monthly_detail ?? "Monthly ERP support, maintenance and development for {month}.";
     $("cActive").checked = c ? c.active : true;
+    $("cAuto").checked = !!c?.auto_invoice;
+    $("cAutoFrom").value = c?.auto_from_month ? c.auto_from_month.slice(0, 7) : addMonth(todayISO(), 0);
+    $("cTo").value = c?.email_to || ""; $("cCc").value = c?.email_cc || "";
+    $("cSubj").value = c?.email_subject ?? DEFAULT_SUBJECT; $("cBody").value = c?.email_body ?? DEFAULT_BODY;
+    syncAuto();
     $("cliDlg").showModal();
   }
   $("cliForm").addEventListener("submit", async e => {
     e.preventDefault();
     const rec = { name: $("cName").value.trim(), address: $("cAddr").value.trim(), gstin: $("cGst").value.trim(),
       tds_pct: Number($("cTds").value) || 0, currency: $("cCur").value || "INR", monthly_rate: $("cRate").value === "" ? null : Number($("cRate").value),
-      monthly_title: $("cTitle").value.trim(), monthly_detail: $("cDetail").value.trim(), active: $("cActive").checked };
+      monthly_title: $("cTitle").value.trim(), monthly_detail: $("cDetail").value.trim(), active: $("cActive").checked,
+      auto_invoice: $("cAuto").checked, auto_from_month: $("cAutoFrom").value ? $("cAutoFrom").value + "-01" : null,
+      email_to: $("cTo").value.trim(), email_cc: $("cCc").value.trim(), email_subject: $("cSubj").value, email_body: $("cBody").value };
+    if (rec.auto_invoice && !rec.email_to) return toast("Add an 'Email to' address for automatic invoices.", true);
+    if (rec.auto_invoice && !(rec.monthly_rate > 0)) return toast("Set the monthly fee for automatic invoices.", true);
     const q = S.editCli ? sb.from("clients").update(rec).eq("id", S.editCli.id) : sb.from("clients").insert(rec);
     const { error } = await q; if (error) return fail(error, "Couldn't save client");
     $("cliDlg").close(); toast("Client saved"); loadAll();

@@ -1,0 +1,10 @@
+{
+  "name": "es-invoices-automation",
+  "private": true,
+  "description": "Monthly recurring invoice job (run by GitHub Actions)",
+  "dependencies": {
+    "@supabase/supabase-js": "2.117.2",
+    "jspdf": "2.5.2",
+    "nodemailer": "10.0.13"
+  }
+}
