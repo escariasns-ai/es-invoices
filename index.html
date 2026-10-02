@@ -1,0 +1,339 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>ES Invoices &amp; Expenses</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='6' fill='%231F5B4F'/><text x='16' y='21' font-family='Arial' font-weight='700' font-size='13' fill='white' text-anchor='middle'>ES</text></svg>">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Source+Sans+3:wght@400;500;600;700&display=swap" rel="stylesheet">
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.117.2/dist/umd/supabase.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
+<script src="config.js"></script>
+<script src="invoice-pdf.js"></script>
+<style>
+:root{
+  --green:#1F5B4F; --green-ink:#174a40; --tint:#EAF3F0; --panel:#ffffff; --bg:#F4F6F5; --field:#F8FAFB;
+  --ink:#263238; --muted:#667085; --line:#D9E0E4; --warn:#9a5b00; --warn-bg:#FFF5E6; --bad:#B42318; --bad-bg:#FEF3F2;
+  --special:#5B3F8C; --special-bg:#F1ECF8;
+  box-sizing:border-box; padding-top:env(safe-area-inset-top,0px); padding-bottom:env(safe-area-inset-bottom,0px);
+}
+@media (prefers-color-scheme: dark){ :root:not([data-theme="light"]){
+  --tint:#1c302b; --panel:#182220; --bg:#111816; --field:#1f2a28; --ink:#e3ebe8; --muted:#97a5a1; --line:#2c3a37;
+  --warn-bg:#2d2412; --warn:#e2a64d; --bad-bg:#331b19; --bad:#f08b80; --special:#b9a3e3; --special-bg:#261f33; --green-ink:#7cc4b2;
+}}
+:root[data-theme="dark"]{
+  --tint:#1c302b; --panel:#182220; --bg:#111816; --field:#1f2a28; --ink:#e3ebe8; --muted:#97a5a1; --line:#2c3a37;
+  --warn-bg:#2d2412; --warn:#e2a64d; --bad-bg:#331b19; --bad:#f08b80; --special:#b9a3e3; --special-bg:#261f33; --green-ink:#7cc4b2;
+}
+*{box-sizing:border-box}
+html{scroll-padding-top:env(safe-area-inset-top,0px)}
+body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.5 "Source Sans 3",system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+[hidden]{display:none!important}
+.topbar{background:var(--green);color:#fff;position:sticky;top:env(safe-area-inset-top,0px);z-index:5}
+.topbar .in{max-width:1180px;margin:0 auto;padding:10px 20px;display:flex;align-items:center;gap:18px;flex-wrap:wrap}
+.brand{font-weight:700;font-size:17px;display:flex;align-items:center;gap:10px}
+.brand i{font-style:normal;background:#fff;color:var(--green);border-radius:5px;padding:1px 6px;font-size:13px}
+nav{display:flex;gap:4px;flex-wrap:wrap;flex:1}
+nav button{background:transparent;border:0;color:#d6ebe5;font:inherit;font-weight:500;padding:6px 12px;border-radius:5px;cursor:pointer}
+nav button[aria-current="page"]{background:rgba(255,255,255,.16);color:#fff}
+.topbar .who{font-size:13px;opacity:.85;display:flex;gap:10px;align-items:center}
+.topbar .who button{background:transparent;color:#fff;border:1px solid rgba(255,255,255,.4);padding:3px 10px;border-radius:5px;font:inherit;font-size:13px;cursor:pointer}
+main{max-width:1180px;margin:0 auto;padding:22px 20px 60px}
+h1{font-size:24px;margin:0 0 4px;font-weight:700}
+h2{font-size:17px;margin:0 0 10px;font-weight:600}
+.lede{color:var(--muted);margin:0 0 18px}
+.bar{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin-bottom:14px}
+.bar .grow{flex:1}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:16px}
+.kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:12px;margin-bottom:16px}
+.kpi .v{font-size:20px;font-weight:700;font-variant-numeric:tabular-nums}
+.kpi .k{color:var(--muted);font-size:13px}
+.due{border-left:4px solid var(--warn);background:var(--warn-bg)}
+.due.ok{border-left-color:var(--green);background:var(--tint)}
+.two{display:grid;grid-template-columns:1.4fr 1fr;gap:16px}
+@media (max-width:860px){.two{grid-template-columns:1fr}}
+.tablewrap{overflow-x:auto;background:var(--panel);border:1px solid var(--line);border-radius:8px}
+table.list{width:100%;border-collapse:collapse;font-size:14px}
+table.list th{text-align:left;font-weight:600;color:var(--muted);font-size:12.5px;padding:9px 10px;border-bottom:1px solid var(--line);white-space:nowrap}
+table.list td{padding:9px 10px;border-bottom:1px solid var(--line);vertical-align:middle}
+table.list tr:last-child td{border-bottom:0}
+.num{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
+.mono{font-variant-numeric:tabular-nums;font-weight:600;white-space:nowrap}
+.pill{display:inline-block;font-size:12px;font-weight:600;padding:1px 9px;border-radius:20px;white-space:nowrap}
+.pill.regular{background:var(--tint);color:var(--green-ink)} .pill.special{background:var(--special-bg);color:var(--special)}
+.pill.paid{background:var(--tint);color:var(--green-ink)} .pill.issued{background:var(--warn-bg);color:var(--warn)}
+.pill.draft{background:var(--field);color:var(--muted)} .pill.cancelled{background:var(--bad-bg);color:var(--bad)}
+.acts{white-space:nowrap;text-align:right}
+.acts button{margin-left:4px}
+button,.btn{font:inherit;font-size:14px;font-weight:600;border-radius:6px;padding:7px 14px;cursor:pointer;border:1px solid var(--green);background:var(--green);color:#fff}
+button.ghost{background:transparent;color:var(--ink);border-color:var(--line)}
+button.small{padding:3px 9px;font-size:13px;font-weight:500}
+button.danger{background:transparent;color:var(--bad);border-color:var(--line)}
+button:disabled{opacity:.55;cursor:not-allowed}
+button:focus-visible,input:focus,select:focus,textarea:focus{outline:2px solid var(--green);outline-offset:1px}
+label{display:block;font-size:13px;color:var(--muted);margin:10px 0 3px}
+input,select,textarea{width:100%;font:inherit;font-size:14px;color:var(--ink);background:var(--field);border:1px solid var(--line);border-radius:6px;padding:7px 9px}
+textarea{resize:vertical}
+.bar select,.bar input{width:auto}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:0 12px}
+.grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:0 12px}
+@media (max-width:600px){.grid2,.grid3{grid-template-columns:1fr}}
+dialog{border:1px solid var(--line);border-radius:10px;padding:0;width:min(760px,96vw);max-height:92vh;background:var(--panel);color:var(--ink)}
+dialog::backdrop{background:rgba(10,20,18,.45)}
+dialog form{display:flex;flex-direction:column;max-height:92vh}
+.dhead{padding:14px 18px;border-bottom:1px solid var(--line);display:flex;justify-content:space-between;align-items:center;gap:10px}
+.dbody{padding:4px 18px 16px;overflow:auto}
+.dfoot{padding:12px 18px;border-top:1px solid var(--line);display:flex;gap:8px;justify-content:flex-end;flex-wrap:wrap}
+.seg{display:inline-flex;border:1px solid var(--line);border-radius:6px;overflow:hidden;margin-top:10px}
+.seg label{margin:0;padding:6px 14px;cursor:pointer;color:var(--ink);font-size:14px}
+.seg input{position:absolute;opacity:0;width:1px}
+.seg label:has(input:checked){background:var(--green);color:#fff}
+.numbox{font-size:13px;color:var(--muted);margin-top:10px}
+.numbox b{color:var(--ink);font-size:15px}
+.item{border:1px solid var(--line);border-radius:6px;padding:4px 10px 10px;margin-top:10px;background:var(--field)}
+.item .row{display:grid;grid-template-columns:1fr 90px 130px auto;gap:8px;align-items:end}
+@media (max-width:600px){.item .row{grid-template-columns:1fr 1fr}}
+.sums{margin-top:12px;display:grid;grid-template-columns:auto auto;justify-content:end;gap:2px 22px;font-variant-numeric:tabular-nums}
+.sums .t{font-weight:700}
+.bars{display:grid;grid-template-columns:repeat(12,1fr);gap:6px;align-items:end;height:150px;margin-top:8px}
+.bars .col{display:flex;flex-direction:column;justify-content:flex-end;align-items:center;height:100%;gap:2px}
+.bars .b{width:42%;border-radius:2px 2px 0 0;min-height:1px}
+.bars .pair{display:flex;gap:2px;align-items:flex-end;justify-content:center;width:100%;height:100%}
+.bars .inv{background:var(--green)} .bars .exp{background:#C9A15A}
+.bars .m{font-size:11px;color:var(--muted)}
+.legend{font-size:12.5px;color:var(--muted);display:flex;gap:14px;margin-top:6px}
+.legend span::before{content:"";display:inline-block;width:10px;height:10px;border-radius:2px;margin-right:5px;vertical-align:-1px}
+.legend .li::before{background:var(--green)} .legend .le::before{background:#C9A15A}
+.empty{color:var(--muted);padding:18px;text-align:center}
+.login{max-width:380px;margin:12vh auto;background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:26px}
+.login h1{color:var(--green-ink)}
+#toast{position:fixed;left:50%;bottom:calc(20px + env(safe-area-inset-bottom,0px));transform:translateX(-50%);background:var(--ink);color:var(--panel);padding:9px 16px;border-radius:6px;font-size:14px;z-index:50;max-width:90vw}
+#toast.err{background:var(--bad);color:#fff}
+.muted{color:var(--muted)} code{background:var(--field);border:1px solid var(--line);border-radius:4px;padding:0 4px;font-size:12.5px}
+#seriesBody input,#seriesBody select{padding:5px 7px} .small{font-size:13px}
+.hint{font-size:12.5px;color:var(--muted);margin-top:4px}
+</style>
+</head>
+<body>
+
+<!-- ============ LOGIN ============ -->
+<section id="loginView" class="login" hidden>
+  <h1>Invoices &amp; Expenses</h1>
+  <p class="muted small">Sign in with the user you created in Supabase.</p>
+  <form id="loginForm">
+    <label for="lgEmail">Email</label><input id="lgEmail" type="email" autocomplete="username" required>
+    <label for="lgPass">Password</label><input id="lgPass" type="password" autocomplete="current-password" required>
+    <div style="margin-top:16px"><button type="submit" style="width:100%">Sign in</button></div>
+    <p id="lgMsg" class="small" style="color:var(--bad);min-height:20px"></p>
+  </form>
+</section>
+
+<!-- ============ APP ============ -->
+<div id="appView" hidden>
+  <header class="topbar"><div class="in">
+    <div class="brand"><i>ES</i> Invoices &amp; Expenses</div>
+    <nav id="nav">
+      <button data-tab="dash" aria-current="page">Dashboard</button>
+      <button data-tab="inv">Invoices</button>
+      <button data-tab="exp">Expenses</button>
+      <button data-tab="cli">Clients</button>
+      <button data-tab="set">Settings</button>
+    </nav>
+    <div class="who"><span id="whoEmail"></span><button id="btnLogout" type="button">Sign out</button></div>
+  </div></header>
+
+  <main>
+    <!-- Dashboard -->
+    <section id="tab-dash">
+      <div class="bar"><div class="grow"><h1>Dashboard</h1></div>
+        <select id="fySel" aria-label="Financial year"></select></div>
+      <div id="dueCards" style="display:grid;gap:10px;margin-bottom:16px"></div>
+      <div class="kpis" id="kpis"></div>
+      <div class="two">
+        <div class="card"><h2>Month by month</h2><div id="chart"></div></div>
+        <div class="card"><h2>Expenses by category</h2><div id="catTable"></div></div>
+      </div>
+    </section>
+
+    <!-- Invoices -->
+    <section id="tab-inv" hidden>
+      <div class="bar">
+        <div class="grow"><h1>Invoices</h1></div>
+        <select id="invKind" aria-label="Type"><option value="">All types</option><option value="regular">Regular (ESR)</option><option value="special">Special (ESS)</option></select>
+        <select id="invStatus" aria-label="Status"><option value="">All statuses</option><option>draft</option><option>issued</option><option>paid</option><option>cancelled</option></select>
+        <button class="ghost" id="invCsv" type="button">CSV</button>
+        <button class="ghost" id="newSpecial" type="button">New special</button>
+        <button id="newRegular" type="button">New regular</button>
+      </div>
+      <div class="tablewrap"><table class="list"><thead><tr>
+        <th>Invoice</th><th>Date</th><th>Client</th><th>Type</th><th class="num">Gross</th><th class="num">Net</th><th>Status</th><th></th>
+      </tr></thead><tbody id="invBody"></tbody></table></div>
+    </section>
+
+    <!-- Expenses -->
+    <section id="tab-exp" hidden>
+      <div class="bar">
+        <div class="grow"><h1>Expenses</h1></div>
+        <input type="month" id="expMonth" aria-label="Month">
+        <select id="expCat" aria-label="Category"><option value="">All categories</option></select>
+        <button class="ghost" id="expCsv" type="button">CSV</button>
+        <button id="newExp" type="button">Add expense</button>
+      </div>
+      <p class="muted small" id="expTotals"></p>
+      <div class="tablewrap"><table class="list"><thead><tr>
+        <th>Date</th><th>Category</th><th>Description</th><th>Client</th><th class="num">Amount</th><th>Receipt</th><th></th>
+      </tr></thead><tbody id="expBody"></tbody></table></div>
+    </section>
+
+    <!-- Clients -->
+    <section id="tab-cli" hidden>
+      <div class="bar"><div class="grow"><h1>Clients</h1></div><button id="newCli" type="button">Add client</button></div>
+      <div class="tablewrap"><table class="list"><thead><tr>
+        <th>Client</th><th>Monthly fee</th><th>TDS</th><th>Status</th><th></th>
+      </tr></thead><tbody id="cliBody"></tbody></table></div>
+    </section>
+
+    <!-- Settings -->
+    <section id="tab-set" hidden>
+      <h1>Settings</h1>
+      <p class="lede">These details print on every invoice.</p>
+      <form id="profileForm" class="card" style="max-width:720px">
+        <div class="grid2">
+          <div><label for="pfName">Name on invoice</label><input id="pfName" required></div>
+          <div><label for="pfTitle">Title</label><input id="pfTitle"></div>
+        </div>
+        <label for="pfAddress">Address</label><input id="pfAddress">
+        <div class="grid2">
+          <div><label for="pfContact">Email / phone</label><input id="pfContact"></div>
+          <div><label for="pfPan">PAN</label><input id="pfPan"></div>
+        </div>
+        <h2 style="margin-top:18px">Bank details</h2>
+        <div class="grid2">
+          <div><label for="pfAccName">Account name</label><input id="pfAccName"></div>
+          <div><label for="pfBank">Bank</label><input id="pfBank"></div>
+          <div><label for="pfAccNo">Account no.</label><input id="pfAccNo"></div>
+          <div><label for="pfIfsc">IFSC</label><input id="pfIfsc"></div>
+        </div>
+        <label for="pfFooter">Footer line</label><input id="pfFooter">
+        <div style="margin-top:16px"><button type="submit">Save</button></div>
+      </form>
+
+      <h2 style="margin-top:28px">Number series</h2>
+      <p class="lede small">Each invoice type has its own series. Tokens: <code>{PREFIX}</code> <code>{DD}</code> <code>{MM}</code> <code>{YY}</code> <code>{YYYY}</code> <code>{FY}</code> (26-27) and <code>{SEQ}</code> or <code>{SEQ:4}</code> for a running number (0001). Changes apply to new invoices only; issued numbers never change.</p>
+      <div class="tablewrap" style="max-width:980px"><table class="list" id="seriesTable"><thead><tr>
+        <th>Series</th><th>Prefix</th><th>Pattern</th><th>Next no.</th><th>Restart running no.</th><th>Next invoice will be</th><th></th>
+      </tr></thead><tbody id="seriesBody"></tbody></table></div>
+
+      <h2 style="margin-top:28px">Exchange rates</h2>
+      <p class="lede small">Rates are to INR (1 unit = ? INR). An invoice or expense picks the latest rate on or before its date; you can still override it on the document.</p>
+      <form id="rateForm" class="bar" style="max-width:980px">
+        <select id="rCur" aria-label="Currency" required></select>
+        <input type="date" id="rDate" aria-label="Rate date" required>
+        <input type="number" id="rRate" aria-label="Rate in INR" min="0" step="0.000001" placeholder="Rate in INR" required style="width:150px">
+        <input id="rNote" aria-label="Source" placeholder="Source (e.g. RBI ref., bank)" style="flex:1;min-width:160px">
+        <button type="submit">Add rate</button>
+      </form>
+      <div class="tablewrap" style="max-width:980px"><table class="list"><thead><tr>
+        <th>Currency</th><th>Effective from</th><th class="num">1 unit = INR</th><th>Source</th><th></th>
+      </tr></thead><tbody id="rateBody"></tbody></table></div>
+    </section>
+  </main>
+</div>
+
+<!-- ============ INVOICE DIALOG ============ -->
+<dialog id="invDlg"><form id="invForm" method="dialog">
+  <div class="dhead"><h2 id="invDlgTitle" style="margin:0">Invoice</h2><button type="button" class="ghost small" data-close>Close</button></div>
+  <div class="dbody">
+    <div class="seg" role="radiogroup" aria-label="Invoice type">
+      <label><input type="radio" name="kind" value="regular" checked> Regular · ESR</label>
+      <label><input type="radio" name="kind" value="special"> Special · ESS</label>
+    </div>
+    <div class="numbox" id="numBox"></div>
+    <div class="grid3">
+      <div><label for="fClient">Client</label><select id="fClient" required></select></div>
+      <div id="svcWrap"><label for="fSvc">Service month</label><input type="month" id="fSvc"></div>
+      <div><label for="fDate">Invoice date</label><input type="date" id="fDate" required></div>
+    </div>
+    <div class="grid3">
+      <div><label for="fCur">Currency</label><select id="fCur"></select></div>
+      <div id="fxWrap"><label for="fFx">Exchange rate (1 <span id="fCurLbl">USD</span> = ? INR)</label><input type="number" id="fFx" min="0" step="0.000001"></div>
+      <div id="fxInfo" class="hint" style="align-self:end;padding-bottom:8px"></div>
+    </div>
+    <div id="items"></div>
+    <button type="button" class="ghost small" id="addItem" style="margin-top:8px">Add line</button>
+    <div class="grid3">
+      <div><label for="fTds">TDS %</label><input type="number" id="fTds" min="0" max="100" step="0.01"></div>
+      <div><label for="fTax">GST / Taxes</label><input id="fTax" placeholder="As applicable"></div>
+      <div><label for="fStatus">Status</label><select id="fStatus"><option>draft</option><option>issued</option><option>paid</option><option>cancelled</option></select></div>
+    </div>
+    <div class="grid3" id="paidWrap">
+      <div><label for="fPaidDate">Paid on</label><input type="date" id="fPaidDate"></div>
+      <div><label for="fPayRef">Payment ref.</label><input id="fPayRef" placeholder="BP26-27/BIO/…"></div>
+      <div><label for="fRecv">Amount received (INR)</label><input type="number" id="fRecv" step="0.01"></div>
+    </div>
+    <label for="fNotes">Notes (one per line)</label><textarea id="fNotes" rows="3"></textarea>
+    <div class="hint">When marked paid, a "Paid on … ref …" note is added to the PDF automatically.</div>
+    <div class="sums" id="sums"></div>
+  </div>
+  <div class="dfoot">
+    <button type="button" class="danger" id="invDelete">Delete</button>
+    <span style="flex:1"></span>
+    <button type="button" class="ghost" id="invPreview">Preview PDF</button>
+    <button type="submit" id="invSave">Save</button>
+  </div>
+</form></dialog>
+
+<!-- ============ EXPENSE DIALOG ============ -->
+<dialog id="expDlg"><form id="expForm" method="dialog">
+  <div class="dhead"><h2 id="expDlgTitle" style="margin:0">Expense</h2><button type="button" class="ghost small" data-close>Close</button></div>
+  <div class="dbody">
+    <div class="grid3">
+      <div><label for="eDate">Date</label><input type="date" id="eDate" required></div>
+      <div><label for="eCat">Category</label><input id="eCat" list="catList" required><datalist id="catList"></datalist></div>
+      <div><label for="eVia">Paid via</label><input id="eVia" list="viaList" placeholder="Card, UPI, cash…"><datalist id="viaList"></datalist></div>
+    </div>
+    <label for="eDesc">Description</label><input id="eDesc">
+    <div class="grid3">
+      <div><label for="eAmt">Amount</label><input type="number" id="eAmt" min="0" step="0.01" required></div>
+      <div><label for="eCur">Currency</label><select id="eCur"></select></div>
+      <div id="eFxWrap"><label for="eFx">Rate (1 <span id="eCurLbl">AED</span> = ? INR)</label><input type="number" id="eFx" min="0" step="0.000001"></div>
+    </div>
+    <div class="grid3">
+      <div><label for="eClient">For client (optional)</label><select id="eClient"></select></div>
+      <div class="hint" id="eInr" style="align-self:end;padding-bottom:8px"></div>
+    </div>
+    <label for="eFile">Receipt (image or PDF)</label><input type="file" id="eFile" accept="image/*,application/pdf">
+    <div class="hint" id="eFileNow"></div>
+  </div>
+  <div class="dfoot">
+    <button type="button" class="danger" id="expDelete">Delete</button>
+    <span style="flex:1"></span>
+    <button type="submit" id="expSave">Save</button>
+  </div>
+</form></dialog>
+
+<!-- ============ CLIENT DIALOG ============ -->
+<dialog id="cliDlg"><form id="cliForm" method="dialog">
+  <div class="dhead"><h2 id="cliDlgTitle" style="margin:0">Client</h2><button type="button" class="ghost small" data-close>Close</button></div>
+  <div class="dbody">
+    <label for="cName">Name</label><input id="cName" required>
+    <label for="cAddr">Address</label><textarea id="cAddr" rows="2"></textarea>
+    <div class="grid2">
+      <div><label for="cGst">GSTIN</label><input id="cGst"></div>
+      <div><label for="cTds">TDS % they deduct</label><input type="number" id="cTds" min="0" step="0.01"></div>
+      <div><label for="cCur">Billing currency</label><select id="cCur"></select></div>
+      <div><label for="cRate">Monthly fee (regular)</label><input type="number" id="cRate" min="0" step="0.01" placeholder="blank = no monthly"></div>
+    </div>
+    <label for="cTitle">Monthly line title</label><input id="cTitle">
+    <label for="cDetail">Monthly line detail</label><input id="cDetail">
+    <div class="hint">{month} is replaced with the service month, e.g. "September 2026".</div>
+    <label style="display:flex;gap:8px;align-items:center;color:var(--ink);margin-top:12px"><input type="checkbox" id="cActive" style="width:auto"> Active</label>
+  </div>
+  <div class="dfoot"><button type="submit">Save</button></div>
+</form></dialog>
+
+<div id="toast" hidden role="status"></div>
+<script src="app.js"></script>
+</body>
+</html>

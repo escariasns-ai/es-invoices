@@ -1,0 +1,4 @@
+*PRIVATE*
+seed*.sql
+!supabase/schema.sql
+.DS_Store
