@@ -80,13 +80,16 @@ Safety checks:
 **Emailing an invoice yourself**
 
 Every invoice has an **Email** button, which opens a draft filled from the client's template. You can edit the recipients, subject and message, then pick one of two options:
-- **Send.** The email is queued, and the mail job sends the PDF from your address within about 10–15 minutes, with a copy to you. The invoice list shows ✉ queued, then the sent date, or ✉ failed with the reason. You can cancel a queued email until it goes out.
+- **Send.** The email is queued, and the mail job sends the PDF from your address within about 10–15 minutes (GitHub's schedule is sometimes slower), with a copy to you. The invoice list shows ✉ queued, then the sent date, or ✉ failed with the reason. You can cancel a queued email until it goes out.
+- If a run is cancelled or times out while sending, the request would otherwise sit on *sending* forever and lock that invoice out of email. Those claims are now shown as **✉ stuck**, and the next run frees them after 15 minutes (`CLAIM_STALE_MIN`) — unless the mail log shows it did go out after all, in which case it's marked sent instead of being sent twice. You can also cancel a stuck one and send again straight away.
 - **Use my email app.** This downloads the PDF and opens a ready draft in Outlook or Gmail, so you attach the file and send it yourself.
 
 **Expense bills on invoices**
 
 - **Copying an expense.** **Copy**, in the list or in the expense window, starts a new expense with the same details, dated today. You then attach the new bill.
-- **Billing expenses to a client.** In an invoice, **Add expense bills…** lets you tick one or more unbilled expenses. Each one becomes its own "Reimbursement" line at cost, converted to the invoice currency.
+- **Billing expenses to a client.** Two ways round:
+  - *From an invoice.* **Add expense bills…** lets you tick one or more unbilled expenses. Each becomes its own "Reimbursement" line at cost, converted to the invoice currency.
+  - *From the expenses list.* An expense is **billable** once it has a client and isn't on an invoice yet. Tick the ones you want and click **Create invoice** — it opens a new special invoice for that client, in the client's billing currency at the current rate, with one reimbursement line per expense, TDS off and a note about the attached bills. You check it and Save. The **Billing status** filter narrows the list to *Billable, not yet invoiced*, *Already billed* or *My own (no client)*. One invoice covers one client, so a selection spanning two clients is refused rather than billed to the wrong party.
 - **Tracking.** The expense is then marked *billed on #invoice*, so it can't be billed twice. Removing the line from the invoice frees the expense again.
 - **Receipts.** When the invoice is emailed, the expense receipts go out as attachments alongside the invoice PDF.
 - **TDS.** Each line has a *TDS applies* tick. Expense lines start with it off, so TDS is worked out only on your fee. Tick it for any expense where the client should deduct TDS. When some lines are excluded, the PDF shows the base, for example *Less: TDS @ 10% on 55,000 (reimbursements excluded)*.

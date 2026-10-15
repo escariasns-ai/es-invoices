@@ -12,7 +12,7 @@
   const MONTHS = ["January","February","March","April","May","June","July","August","September","October","November","December"];
   const SM = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
   const DEFAULT_CATS = ["Software & subscriptions","Internet & phone","Hardware","Travel","Bank charges","Professional fees","Office & supplies","Training & certification","Other"];
-  const S = { user: null, profile: null, clients: [], invoices: [], expenses: [], series: [], rates: [], mailReqs: [], mailInv: null, fy: null, editInv: null, editExp: null, editCli: null, fxAuto: true, eFxAuto: true };
+  const S = { user: null, profile: null, clients: [], invoices: [], expenses: [], series: [], rates: [], mailReqs: [], mailInv: null, fy: null, editInv: null, editExp: null, editCli: null, fxAuto: true, eFxAuto: true, expSel: new Set() };
   const BASE_CURRENCIES = ["INR", "AED", "USD", "EUR", "GBP", "SAR", "QAR", "OMR", "KWD", "BHD", "SGD", "AUD", "CAD"];
   const SERIES_DEFAULTS = {
     regular: { kind: "regular", name: "Regular invoices", prefix: "ESR-", pattern: "{PREFIX}{DD}{MM}{YY}", next_seq: 1, reset_every: "never", last_reset_key: null },
@@ -104,7 +104,7 @@
         sb.from("expenses").select("*").order("expense_date", { ascending: false }),
         sb.from("number_series").select("*"),
         sb.from("exchange_rates").select("*").order("currency").order("rate_date", { ascending: false }),
-        sb.from("email_requests").select("id,invoice_id,status,error,requested_at,processed_at,send_to").order("requested_at", { ascending: false }).limit(300)
+        sb.from("email_requests").select("id,invoice_id,status,error,requested_at,claimed_at,processed_at,send_to").order("requested_at", { ascending: false }).limit(300)
       ]);
       for (const r of [p, c, i, x, ns, fx, mr]) if (r.error) throw r.error;
       S.mailReqs = mr.data;
@@ -237,9 +237,14 @@
 
   /* ---------------- email (manual) ---------------- */
   const lastReq = inv => S.mailReqs.find(r => r.invoice_id === inv.id);
+  const STALE_MIN = 15;   // keep in step with CLAIM_STALE_MIN in automation/recurring.js
+  // a request the job claimed but never finished: the run was cancelled or timed out mid-send
+  const reqStuck = r => !!r && r.status === "sending" && Date.now() - Date.parse(r.claimed_at || r.requested_at) > STALE_MIN * 60000;
+  const reqPending = r => !!r && (r.status === "queued" || (r.status === "sending" && !reqStuck(r)));
   function mailPill(i) {
     const r = lastReq(i);
-    if (r && (r.status === "queued" || r.status === "sending")) return ` <span class="pill queued" title="To ${esc(r.send_to)}">✉ queued</span>`;
+    if (reqStuck(r)) return ` <span class="pill failed" title="A run stopped mid-send. The mail job frees it within ${STALE_MIN} minutes, or cancel it and send again.">✉ stuck</span>`;
+    if (reqPending(r)) return ` <span class="pill queued" title="To ${esc(r.send_to)}">✉ queued</span>`;
     if (r && r.status === "failed" && (!i.emailed_at || r.requested_at > i.emailed_at)) return ` <span class="pill failed" title="${esc(r.error)}">✉ failed</span>`;
     return i.emailed_at ? ` <span class="pill draft" title="Emailed to ${esc(i.emailed_to)}">✉ ${fmtDate(i.emailed_at.slice(0, 10))}</span>` : "";
   }
@@ -262,12 +267,13 @@
     $("mTo").value = c.email_to || ""; $("mCc").value = c.email_cc || "";
     $("mSubj").value = fillTpl(c.email_subject || DEFAULT_SUBJECT, v);
     $("mBody").value = fillTpl(c.email_body || DEFAULT_BODY, v);
-    const pending = r && (r.status === "queued" || r.status === "sending");
-    $("mailInfo").innerHTML = pending ? `<b>Already queued</b> at ${new Date(r.requested_at).toLocaleString()} — sending soon.`
+    const pending = reqPending(r), stuck = reqStuck(r);
+    $("mailInfo").innerHTML = stuck ? `<span style="color:var(--bad)">A previous run stopped before sending this. The mail job frees it and sends it within about ${STALE_MIN} minutes — or cancel it below and send again now.</span>`
+      : pending ? `<b>Already queued</b> at ${new Date(r.requested_at).toLocaleString()} — sending soon.`
       : r && r.status === "failed" ? `<span style="color:var(--bad)">Last attempt failed: ${esc(r.error)}</span>`
       : inv.emailed_at ? `Already emailed to ${esc(inv.emailed_to)} on ${fmtDate(inv.emailed_at.slice(0, 10))}. Sending again is fine.`
       : inv.status === "draft" ? `This invoice is a draft — it will be marked issued when you send.` : "";
-    $("mailCancelQ").hidden = !(r && r.status === "queued");
+    $("mailCancelQ").hidden = !(r && (r.status === "queued" || stuck));
     $("mailSend").disabled = !!pending;
     $("mailDlg").showModal();
   }
@@ -294,7 +300,8 @@
   });
   $("mailCancelQ").addEventListener("click", async () => {
     const r = S.mailInv && lastReq(S.mailInv); if (!r) return;
-    const { error } = await sb.from("email_requests").update({ status: "cancelled" }).eq("id", r.id).eq("status", "queued");
+    const { error } = await sb.from("email_requests").update({ status: "cancelled", processed_at: new Date().toISOString() })
+      .eq("id", r.id).in("status", reqStuck(r) ? ["queued", "sending"] : ["queued"]);
     if (error) return fail(error, "Couldn't cancel");
     $("mailDlg").close(); toast("Queued email cancelled"); loadAll();
   });
@@ -307,6 +314,18 @@
     if (drop.length) { const { error } = await sb.from("expenses").update({ invoice_id: null }).in("id", drop); if (error) throw error; }
   }
   const invNoOf = id => (S.invoices.find(i => i.id === id) || {}).invoice_no;
+  // one invoice line for a re-billed expense, at cost, in the invoice's currency
+  function expenseLine(x, cur, fx) {
+    const amt = x.currency === cur ? +x.amount : Math.round(expINR(x) / fx * 100) / 100;
+    const conv = x.currency !== cur ? ` (${money(x.amount, x.currency)} @ ${+x.fx_rate})` : "";
+    return { expense_id: x.id, tds: false, title: `Reimbursement – ${x.category}`,
+      detail: `${x.description ? x.description + ", " : ""}${fmtDate(x.expense_date)}${conv}${x.receipt_path ? ". Bill attached." : ""}`,
+      qty: 1, rate: amt };
+  }
+  function dropBlankFirstLine() {
+    const first = $("items").children[0];
+    if (first && !first.dataset.exp && !first.querySelector('[data-f="title"]').value.trim() && !+first.querySelector('[data-f="rate"]').value) first.remove();
+  }
   function pickable() {
     const onForm = new Set(readItems().map(i => i.expense_id).filter(Boolean));
     const me = S.editInv?.id, cid = $("fClient").value, scope = $("pickScope").value;
@@ -336,17 +355,8 @@
     const cur = $("fCur").value || "INR", fx = cur === "INR" ? 1 : (+$("fFx").value || 0);
     if (cur !== "INR" && !fx) return toast(`Enter the ${cur} → INR rate on the invoice first.`, true);
     const sel = [...$("pickBody").querySelectorAll("[data-pick]:checked")].map(c => S.expenses.find(x => x.id === c.dataset.pick));
-    // replace an empty first line instead of leaving it blank
-    const first = $("items").children[0];
-    if (first && !first.dataset.exp && !first.querySelector('[data-f="title"]').value.trim() && !+first.querySelector('[data-f="rate"]').value) first.remove();
-    sel.forEach(x => {
-      const amt = x.currency === cur ? +x.amount : Math.round(expINR(x) / fx * 100) / 100;
-      $("items").appendChild(itemRow({
-        expense_id: x.id, tds: false, title: `Reimbursement – ${x.category}`,
-        detail: `${x.description ? x.description + ", " : ""}${fmtDate(x.expense_date)}${x.currency !== cur ? ` (${money(x.amount, x.currency)} @ ${+x.fx_rate})` : ""}. Bill attached.`.replace(" Bill attached.", x.receipt_path ? " Bill attached." : ""),
-        qty: 1, rate: amt
-      }));
-    });
+    dropBlankFirstLine();   // replace an empty first line instead of leaving it blank
+    sel.forEach(x => $("items").appendChild(itemRow(expenseLine(x, cur, fx))));
     $("pickDlg").close(); calcSums(); toast(`${sel.length} expense${sel.length > 1 ? "s" : ""} added`);
   });
 
@@ -377,7 +387,7 @@
     const t = window.InvoicePDF.totals({ items: readItems(), tds_pct: $("fTds").value });
     const cur = $("fCur").value || "INR", fx = cur === "INR" ? 1 : (+$("fFx").value || 0);
     $("sums").innerHTML = `<span>Invoice total</span><span class="num">${money(t.subtotal, cur)}</span>
-      <span>Less TDS @ ${t.tdsPct}%${Math.abs(t.tdsBase - t.subtotal) > 0.004 ? ` on ${money(t.tdsBase, cur)}` : ""}</span><span class="num">(${money(t.tds, cur)})</span>
+      <span>Less TDS @ ${t.tdsPct}%${t.tdsPct > 0 && Math.abs(t.tdsBase - t.subtotal) > 0.004 ? ` on ${money(t.tdsBase, cur)}` : ""}</span><span class="num">(${money(t.tds, cur)})</span>
       <span class="t">Net receivable</span><span class="num t">${money(t.net, cur)}</span>` +
       (cur !== "INR" ? `<span class="muted">In INR @ ${fx || "?"}</span><span class="num muted">${fx ? money(t.net * fx) : "set a rate"}</span>` : "");
     updateNumBox();
@@ -551,23 +561,76 @@
     const tot = {}; rows.forEach(x => tot[x.currency] = (tot[x.currency] || 0) + +x.amount);
     const totINR = rows.reduce((s, x) => s + expINR(x), 0);
     $("expTotals").textContent = rows.length ? `${rows.length} entries · ${money(totINR)} in INR` + (Object.keys(tot).some(k => k !== "INR") ? " (" + Object.entries(tot).map(([k, v]) => money(v, k)).join(" + ") + ")" : "") : "";
+    pruneExpSel();
     $("expBody").innerHTML = rows.length ? rows.map(x => `<tr>
+      <td>${billable(x) ? `<input type="checkbox" data-xsel="${x.id}" style="width:auto" aria-label="Select for invoice"${S.expSel.has(x.id) ? " checked" : ""}>` : ""}</td>
       <td>${fmtDate(x.expense_date)}</td><td>${esc(x.category)}</td><td>${esc(x.description)}${x.paid_via ? `<div class="small muted">${esc(x.paid_via)}</div>` : ""}${x.invoice_id ? `<div class="small"><span class="pill paid">billed on #${esc(invNoOf(x.invoice_id) || "?")}</span></div>` : ""}</td>
       <td>${x.client_id ? esc(clientName(x.client_id)) : '<span class="muted">—</span>'}</td>
       <td class="num">${money(x.amount, x.currency)}${x.currency !== "INR" ? `<div class="small muted">${money(expINR(x))} @ ${+x.fx_rate}</div>` : ""}</td>
       <td>${x.receipt_path ? `<button class="ghost small" data-rcpt="${x.id}">View</button>` : '<span class="muted small">none</span>'}</td>
       <td class="acts"><button class="ghost small" data-xcopy="${x.id}" title="New expense with the same details">Copy</button> <button class="ghost small" data-xedit="${x.id}">Edit</button></td></tr>`).join("")
-      : `<tr><td colspan="7" class="empty">No expenses for this filter.</td></tr>`;
+      : `<tr><td colspan="8" class="empty">No expenses for this filter.</td></tr>`;
     $("expBody").querySelectorAll("[data-xedit]").forEach(b => b.onclick = () => openExpense(S.expenses.find(x => x.id === b.dataset.xedit)));
     $("expBody").querySelectorAll("[data-xcopy]").forEach(b => b.onclick = () => openExpense(S.expenses.find(x => x.id === b.dataset.xcopy), true));
     $("expBody").querySelectorAll("[data-rcpt]").forEach(b => b.onclick = () => viewReceipt(S.expenses.find(x => x.id === b.dataset.rcpt)));
+    $("expBody").querySelectorAll("[data-xsel]").forEach(c => c.addEventListener("change", () => {
+      if (c.checked) S.expSel.add(c.dataset.xsel); else S.expSel.delete(c.dataset.xsel);
+      renderExpSel();
+    }));
+    renderExpSel();
   }
   function filteredExpenses() {
-    const m = $("expMonth").value, c = $("expCat").value;
-    return S.expenses.filter(x => (m ? x.expense_date.startsWith(m) : inFY(x.expense_date, S.fy)) && (!c || x.category === c));
+    const m = $("expMonth").value, c = $("expCat").value, b = $("expBilled").value;
+    return S.expenses.filter(x => (m ? x.expense_date.startsWith(m) : inFY(x.expense_date, S.fy)) && (!c || x.category === c)
+      && (!b || (b === "billable" ? billable(x) : b === "billed" ? !!x.invoice_id : !x.client_id)));
   }
+
+  /* ----- billable expenses → a new special invoice ----- */
+  // billable = booked against a client and not yet on an invoice
+  const billable = x => !!x.client_id && !x.invoice_id;
+  const selectedExpenses = () => S.expenses.filter(x => S.expSel.has(x.id));
+  // forget anything that has since been billed, deleted, or unassigned from its client
+  function pruneExpSel() { [...S.expSel].forEach(id => { const x = S.expenses.find(e => e.id === id); if (!billable(x || {})) S.expSel.delete(id); }); }
+  function renderExpSel() {
+    const sel = selectedExpenses(), boxes = [...$("expBody").querySelectorAll("[data-xsel]")];
+    $("expAll").disabled = !boxes.length;
+    $("expAll").checked = boxes.length > 0 && boxes.every(b => b.checked);
+    $("expInvoice").disabled = !sel.length;
+    $("expInvoice").textContent = sel.length ? `Create invoice (${sel.length})` : "Create invoice";
+    const names = [...new Set(sel.map(x => clientName(x.client_id)))];
+    $("expSelInfo").textContent = sel.length
+      ? `${sel.length} selected · ${money(sel.reduce((t, x) => t + expINR(x), 0))} · ${names.join(", ")}${names.length > 1 ? " — one invoice covers one client" : ""}`
+      : "";
+  }
+  $("expAll").addEventListener("change", () => {
+    [...$("expBody").querySelectorAll("[data-xsel]")].forEach(b => {
+      b.checked = $("expAll").checked;
+      if (b.checked) S.expSel.add(b.dataset.xsel); else S.expSel.delete(b.dataset.xsel);
+    });
+    renderExpSel();
+  });
+  $("expInvoice").addEventListener("click", () => {
+    const sel = selectedExpenses();
+    if (!sel.length) return;
+    const ids = [...new Set(sel.map(x => x.client_id))];
+    if (ids.length > 1) return toast(`One invoice covers one client. You've picked expenses for ${ids.map(clientName).join(" and ")} — tick just one client's.`, true);
+    const client = S.clients.find(c => c.id === ids[0]);
+    if (!client) return toast("That client no longer exists.", true);
+    if (!client.active) return toast(`${client.name} is inactive — make the client active first.`, true);
+    const cur = client.currency || "INR", info = cur === "INR" ? { rate: 1 } : rateOn(cur, todayISO());
+    if (!info) return toast(`No ${cur} → INR rate on file for today — add one in Settings first.`, true);
+    openInvoice(null, "special", client.id);
+    $("fTds").value = 0;   // reimbursements only, so nothing for the client to deduct
+    dropBlankFirstLine();
+    sel.forEach(x => $("items").appendChild(itemRow(expenseLine(x, cur, info.rate))));
+    if (!$("fNotes").value.trim()) $("fNotes").value = "Reimbursement of expenses incurred on your behalf. Supporting bills attached.";
+    calcSums();
+    toast(`${sel.length} expense${sel.length > 1 ? "s" : ""} added — check the lines and Save.`);
+  });
+
   $("expMonth").addEventListener("change", renderExpenses);
   $("expCat").addEventListener("change", renderExpenses);
+  $("expBilled").addEventListener("change", renderExpenses);
   $("newExp").addEventListener("click", () => openExpense(null));
   $("expCsv").addEventListener("click", () => {
     const rows = filteredExpenses();

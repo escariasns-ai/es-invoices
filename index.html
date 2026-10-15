@@ -181,11 +181,20 @@ dialog form{display:flex;flex-direction:column;max-height:92vh}
         <div class="grow"><h1>Expenses</h1></div>
         <input type="month" id="expMonth" aria-label="Month">
         <select id="expCat" aria-label="Category"><option value="">All categories</option></select>
+        <select id="expBilled" aria-label="Billing status">
+          <option value="">All expenses</option>
+          <option value="billable">Billable, not yet invoiced</option>
+          <option value="billed">Already billed</option>
+          <option value="own">My own (no client)</option>
+        </select>
         <button class="ghost" id="expCsv" type="button">CSV</button>
+        <button class="ghost" id="expInvoice" type="button" disabled>Create invoice</button>
         <button id="newExp" type="button">Add expense</button>
       </div>
       <p class="muted small" id="expTotals"></p>
+      <p class="small" id="expSelInfo" style="color:var(--green-ink);margin-top:-6px"></p>
       <div class="tablewrap"><table class="list"><thead><tr>
+        <th><input type="checkbox" id="expAll" style="width:auto" aria-label="Select all billable"></th>
         <th>Date</th><th>Category</th><th>Description</th><th>Client</th><th class="num">Amount</th><th>Receipt</th><th></th>
       </tr></thead><tbody id="expBody"></tbody></table></div>
     </section>
