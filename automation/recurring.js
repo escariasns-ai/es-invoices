@@ -18,7 +18,7 @@
  * Env (GitHub secrets / inputs):
  *   SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY
  *   SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS, MAIL_FROM, MAIL_COPY_TO
- *   TZ_NAME (default Asia/Kolkata), CATCHUP_DAYS (default 5)
+ *   TZ_NAME (default Asia/Kolkata), CATCHUP_DAYS (default 5), CLAIM_STALE_MIN (default 15)
  *   DRY_RUN=true    → build PDFs and email them ONLY to MAIL_COPY_TO, change nothing
  *   MONTH=YYYY-MM   → service month to process (default: previous month)
  *   INVOICE_NO=...  → (re)send one specific invoice instead
@@ -255,7 +255,39 @@ async function runOne(invoiceNo) {
   return { created: 0, sent: 1, skipped: 0, errors: [] };
 }
 
+// A run cancelled or timed out after claiming a request leaves it stuck on "sending": the app
+// reads that as pending, so the invoice can't be emailed again. Free those claims — but only
+// when nothing actually went out for that invoice after the claim, so a run that died just
+// after SMTP accepted the message never causes a second copy.
+const STALE_MIN = Number(env("CLAIM_STALE_MIN") || 15);
+async function releaseStaleClaims() {
+  const { data: held, error } = await sb.from("email_requests")
+    .select("id,invoice_id,claimed_at,requested_at").eq("status", "sending");
+  if (error) throw error;
+  const cutoff = Date.now() - STALE_MIN * 60 * 1000;
+  const stale = (held || []).filter(r => Date.parse(r.claimed_at || r.requested_at) < cutoff);
+  for (const r of stale) {
+    const since = r.claimed_at || r.requested_at;
+    const { data: went, error: se } = await sb.from("invoice_emails").select("id")
+      .eq("invoice_id", r.invoice_id).eq("status", "sent").eq("test_run", false).gte("sent_at", since).limit(1);
+    if (se) throw se;
+    if (went && went.length) {
+      await sb.from("email_requests").update({ status: "sent", processed_at: new Date().toISOString(), error: null })
+        .eq("id", r.id).eq("status", "sending");
+      console.log("A stuck request had in fact been emailed — marked sent");
+    } else {
+      await sb.from("email_requests").update({ status: "queued", claimed_at: null,
+        error: `a run stopped before sending (claim older than ${STALE_MIN} min) — re-queued` })
+        .eq("id", r.id).eq("status", "sending");
+      console.log("Released a stuck claim back to the queue");
+    }
+  }
+  if (stale.length) console.log(`${stale.length} stale claim(s) handled`);
+  return stale.length;
+}
+
 async function processQueue() {
+  await releaseStaleClaims();
   const { data: reqs, error } = await sb.from("email_requests").select("*").eq("status", "queued").order("requested_at").limit(25);
   if (error) throw error;
   const out = { created: 0, sent: 0, skipped: 0, errors: [] };
@@ -264,7 +296,8 @@ async function processQueue() {
   for (const [idx, r] of reqs.entries()) {
     const tag = `Request #${idx + 1}`;
     // claim it, so two overlapping runs can't send it twice
-    const { data: claimed, error: ce } = await sb.from("email_requests").update({ status: "sending" }).eq("id", r.id).eq("status", "queued").select();
+    const { data: claimed, error: ce } = await sb.from("email_requests")
+      .update({ status: "sending", claimed_at: new Date().toISOString() }).eq("id", r.id).eq("status", "queued").select();
     if (ce) { out.errors.push(`${tag}: ${ce.message}`); continue; }
     if (!claimed || !claimed.length) { console.log(`${tag}: already taken by another run`); continue; }
     let inv = null;
