@@ -307,6 +307,9 @@ create table if not exists public.email_requests (
   error         text
 );
 create index if not exists email_requests_status_idx on public.email_requests (status, requested_at);
+-- when the mail job claimed a request; lets a later run release a claim left behind by a
+-- run that was cancelled or timed out, instead of the request sitting on 'sending' forever
+alter table public.email_requests add column if not exists claimed_at timestamptz;
 
 -- ---------- row level security ----------
 alter table public.profile        enable row level security;
